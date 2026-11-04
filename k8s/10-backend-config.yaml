@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: demo-dev
+data:
+  APP_GREETING: "Ahoj z config mapy"
+  APP_ENV: dev
