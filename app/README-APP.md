@@ -1,4 +1,4 @@
-# Hotová appka (kód netreba meniť)
+# Hotová appka / generovaná pomocou AI
 
 ## backend/
 
