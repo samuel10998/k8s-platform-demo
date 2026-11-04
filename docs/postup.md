@@ -240,3 +240,104 @@ git push
 - `/readyz` hneď po štarte vrátil `Empty reply from server`, gunicorn ešte nebežal. O sekundu neskôr to bolo OK.
 - Po prvom vytvorení klastra hlásil `kubectl version`, že môj kubectl 1.34 a klaster 1.37 sú od seba moc ďaleko (podporovaný rozdiel je 1 verzia). S pomocou AI som do configu pridal image s verziou 1.35.8. Zistil som, že musí byť pri všetkých troch uzloch, inak by workery dostali predvolenú 1.37 a mali by inú verziu ako control-plane.
 - `Stop-Transcript` hlásil, že nič nenahráva. Omylom som zavrel PowerShell a v novom okne som nahrávanie znova nespustil.
+
+---
+
+## Fáza 1 – appka v klastri
+
+### Súbory v k8s/
+
+- `00-namespace.yaml` – namespace `demo-dev`
+- `10-backend-config.yaml` – ConfigMap `backend-config` s `APP_GREETING` a `APP_ENV: dev`
+- `20-backend.yaml` – Deployment `backend` a Service `backend-service`
+- `30-frontend.yaml` – Deployment `frontend` a Service `frontend-service`
+
+Čísla pred menami sú preto, lebo `kubectl apply -f k8s\` berie súbory abecedne a namespace musí byť prvý. Sú po desiatkach, aby sa dal neskôr vložiť súbor medzi ne.
+
+Backend:
+
+- 2 repliky, image `backend:0.1.0`, port 8000
+- premenné z ConfigMapy aj zo Secretu cez `envFrom`
+- requests `cpu: 50m`, `memory: 64Mi`, limits `cpu: 200m`, `memory: 128Mi`
+- readiness probe na `/readyz` (bez `API_KEY` Pod nebude Ready), liveness probe na `/healthz`
+- Service ClusterIP, port 80 → 8000
+
+Frontend:
+
+- 2 repliky, image `frontend:0.1.0`, port 8080
+- requests `cpu: 25m`, `memory: 32Mi`, limits `cpu: 100m`, `memory: 64Mi`
+- readiness aj liveness probe na `/`
+- Service ClusterIP, port 80 → 8080
+
+Obe Services majú port 80, aby sa na ne Ingress vo fáze 2 pripájal rovnako.
+
+### Secret
+
+Secret nie je v Gite, vytváram ho príkazom. Najprv musí existovať namespace:
+
+```powershell
+kubectl apply -f k8s\00-namespace.yaml
+kubectl create secret generic backend-secret --from-literal=API_KEY=<hodnota> -n demo-dev
+```
+
+### Nasadenie
+
+```powershell
+kubectl apply --dry-run=client -f k8s\        # kontrola súborov, nič sa nevytvorí
+kubectl apply -f k8s\
+kubectl wait --for=condition=Ready pods --all -n demo-dev --timeout=120s
+kubectl get pods -n demo-dev -o wide
+kubectl get endpointslices -n demo-dev
+```
+
+`kubectl get endpoints` funguje tiež, ale od Kubernetes 1.33 hlási, že je zastaraný, preto `endpointslices`.
+
+### Overenie
+
+```powershell
+# backend cez Service, viackrát
+kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n demo-dev -- wget -qO- -T 3 http://backend-service/api/hello
+
+# frontend cez Service
+kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n demo-dev -- wget -qO- -T 3 http://frontend-service
+
+# prehliadač
+kubectl port-forward svc/frontend-service 8080:80 -n demo-dev
+```
+
+Čo vyšlo:
+
+- 4 Pody `1/1 Running`, z každej appky jeden na `aspecta-worker` a jeden na `aspecta-worker2`
+- každá Service má 2 endpointy, v nich sú IP Podov a porty 8000 a 8080 (nie 80, endpointy ukazujú priamo na Pody)
+- `/api/hello` vrátil `environment: dev`, správu z ConfigMapy a `secret_configured: true`, odpovedali oba Pody
+- `http://frontend-service` vrátil HTML stránky
+- `http://frontend-service/api/hello` vrátil 404, lebo nginx nemá `/api`
+- cez port-forward sa stránka ukázala na `localhost:8080`, tlačidlo píše HTTP 404 (vyrieši Ingress)
+
+![Frontend cez port-forward](images/faza1-frontend-port-forward.png)
+
+### Git
+
+Od tejto fázy robím každú fázu vo vlastnej vetve a do `main` ju dávam cez pull request.
+
+```powershell
+git switch -c faza-1
+git add k8s docs
+git commit -m "feat: k8s manifesty pre appku"
+git push -u origin faza-1
+# PR na GitHube, merge
+git switch main
+git pull
+```
+
+### S čím som si potreboval pomôcť
+
+- prečo čísla pred menami súborov (zistil som, že `kubectl apply -f k8s\` berie súbory abecedne, takže s číslami ich aplikuje v poradí, v akom ich potrebujem, napr. namespace ako prvý, lebo ostatné objekty doň patria)
+- `--dry-run=client` na celý priečinok (zistil som, že spracuje súbory ako apply, ale nič nevytvorí. Keď je v súbore chyba, dozviem sa to skôr, ako by som chybný súbor aplikoval do klastra. Zachytí ale len chyby v zápise, nie napr. zlé meno Service alebo zlý port)
+- `endpointslices` namiesto `endpoints` (zistil som, že starý objekt Endpoints je od Kubernetes 1.33 zastaraný a nahradili ho EndpointSlices, ktoré sa pri veľkom počte Podov dajú rozdeliť na viac častí)
+- ako napísať readiness a liveness probe a aký je medzi nimi rozdiel
+
+### Problémy
+
+- V Deploymente backendu som mal 2 chyby: `ports` som nemal ako zoznam a v probes som mal `port` vedľa `httpGet` namiesto pod ním (`path` a `port` patria pod `httpGet`).
+
