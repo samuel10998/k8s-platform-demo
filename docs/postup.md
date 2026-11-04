@@ -314,7 +314,7 @@ kubectl port-forward svc/frontend-service 8080:80 -n demo-dev
 - `http://frontend-service/api/hello` vrátil 404, lebo nginx nemá `/api`
 - cez port-forward sa stránka ukázala na `localhost:8080`, tlačidlo píše HTTP 404 (vyrieši Ingress)
 
-![Frontend cez port-forward](images/faza1-frontend-port-forward.png)
+![Frontend cez port-forward](images/faza_1_port_forward_test.png)
 
 ### Git
 
