@@ -1,0 +1,36 @@
+# Predvolené hodnoty = dev prostredie
+
+config:
+  greeting: "Ahoj z config mapy"
+  appEnv: "dev"
+
+backend:
+  replicas: 2
+  image:
+    repository: backend
+    tag: "0.1.0"
+  existingSecret: backend-secret   # Secret sa vytvára príkazom, nie je v Gite
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+frontend:
+  replicas: 2
+  image:
+    repository: frontend
+    tag: "0.1.0"
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+ingress:
+  className: traefik
+  host: dev.localhost

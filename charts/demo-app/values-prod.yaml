@@ -1,0 +1,14 @@
+# Hodnoty pre prod – len rozdiely oproti values.yaml
+
+config:
+  greeting: "Ahoj z produkcie"
+  appEnv: "prod"
+
+backend:
+  replicas: 3
+
+frontend:
+  replicas: 3
+
+ingress:
+  host: prod.localhost
