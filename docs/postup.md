@@ -341,3 +341,268 @@ git pull
 
 - V Deploymente backendu som mal 2 chyby: `ports` som nemal ako zoznam a v probes som mal `port` vedľa `httpGet` namiesto pod ním (`path` a `port` patria pod `httpGet`).
 
+---
+
+## Fáza 3 – vlastný Helm chart
+
+Cieľ bol mať celú appku ako jeden balík, ktorý sa nainštaluje jedným príkazom, s inými hodnotami pre dev a prod. Ten istý chart budú neskôr nasadzovať Argo CD a pipeline.
+
+### Príprava
+
+```powershell
+git switch main
+git pull
+git switch -c faza-3
+Start-Transcript -Path .\logs\faza3.txt -Append
+```
+
+Objekty z fázy 1 vytvoril `kubectl apply`, nie Helm, a Helm cudzie objekty s rovnakým menom neprevezme. Preto som ich zmazal, ale nie namespace a Secret:
+
+```powershell
+kubectl delete -f k8s\40-ingress.yaml -f k8s\30-frontend.yaml -f k8s\20-backend.yaml -f k8s\10-backend-config.yaml
+kubectl get all,configmap,secret,ingress -n demo-dev
+```
+
+Pody a ReplicaSety boli vo výpise ešte chvíľu vidieť, mazanie ide kaskádovo na pozadí. Potom zostal len `backend-secret` a systémová `kube-root-ca.crt`.
+
+### Štruktúra chartu
+
+```
+charts/demo-app/
+├── Chart.yaml
+├── values.yaml         # predvolené hodnoty = dev
+├── values-prod.yaml    # len rozdiely pre prod
+└── templates/
+    ├── configmap.yaml
+    ├── backend.yaml     # Deployment + Service
+    ├── frontend.yaml    # Deployment + Service
+    └── ingress.yaml
+```
+
+`Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: demo-app
+description: Helm chart pre demo appku – frontend (nginx), backend (Flask) a Ingress.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+```
+
+`version` je verzia chartu, `appVersion` verzia appky.
+
+### values.yaml (dev)
+
+```yaml
+config:
+  greeting: "Ahoj z config mapy"
+  appEnv: "dev"
+
+backend:
+  replicas: 2
+  image:
+    repository: backend
+    tag: "0.1.0"
+  existingSecret: backend-secret
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+frontend:
+  replicas: 2
+  image:
+    repository: frontend
+    tag: "0.1.0"
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+ingress:
+  className: traefik
+  host: dev.localhost
+```
+
+### Šablóny
+
+Šablóny som spravil z manifestov z `k8s/`. Zmenil som len miesta, ktoré sa medzi prostrediami líšia:
+
+- mená objektov cez `{{ .Release.Name }}`: `demo-config`, `demo-backend`, `demo-frontend`, Ingress `demo`
+- `namespace` som zo šablón vymazal, určí ho `-n` pri inštalácii
+- štítky namiesto `app: backend`: `app.kubernetes.io/name` a `app.kubernetes.io/instance: {{ .Release.Name }}`, rovnaké v selectore Deploymentu, v šablóne Podu aj v selectore Service
+- repliky, image a resources z values
+- odkazy (`envFrom` na ConfigMap, Ingress na Services) cez ten istý výraz ako meno cieľa
+- Ingress má navyše `host` z values
+
+Príklady z `backend.yaml`:
+
+```yaml
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-config
+            - secretRef:
+                name: {{ .Values.backend.existingSecret }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+```
+
+`toYaml | nindent 12` vloží celý blok z values, číslo je počet medzier pred `requests:`.
+
+`configmap.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  APP_GREETING: {{ .Values.config.greeting | quote }}
+  APP_ENV: {{ .Values.config.appEnv | quote }}
+```
+
+Vľavo je meno premennej, ktorú číta appka, vpravo cesta do `values.yaml`. `quote` dá hodnotu do úvodzoviek, aby bola vždy text.
+
+### Kontrola a inštalácia dev
+
+```powershell
+helm lint charts\demo-app  # Kontrolujem, či som v charte nespravil nejakú hlúpu chybu alebo preklep.
+helm template demo charts\demo-app -s templates/backend.yaml  # Chcem vidieť, ako sa vyrenderuje čisté YAMLko iba pre backend, nech to hneď nenasadzujem.
+helm install demo charts\demo-app -n demo-dev  # Sypem to tam – inštalujem appku pod názvom "demo" do namespace "demo-dev".
+kubectl wait --for=condition=Ready pods --all -n demo-dev --timeout=120s  # Čakám (max 2 minúty), kým všetky pody konečne nazelenajú a budú ready.
+kubectl get pods,svc,ingress -n demo-dev  
+helm list -n demo-dev # Kontrolujem, čo všetko mi vlastne v tom namespace cez Helm beží.
+```
+
+Čo vyšlo:
+
+- `helm lint` bez chýb, len odporúčanie pridať ikonu
+- Helm vo výstupe `helm template` zoradil Service pred Deployment, objekty triedi podľa druhu sám
+- release `demo`, revízia 1, 4 Pody `1/1`, Services `demo-backend`, `demo-frontend`, Ingress s `HOSTS dev.localhost`
+- `http://dev.localhost` ukáže stránku s `Prostredie: dev`
+- `http://localhost` teraz vracia 404 od Traefiku, lebo Ingress má `host: dev.localhost` a na `localhost` žiadne pravidlo nesedí
+- adresy končiace na `.localhost` prehliadač aj curl prekladajú na `127.0.0.1`, netreba meniť súbor `hosts`
+
+### Prod
+
+`values-prod.yaml`, len rozdiely:
+
+```yaml
+config:
+  greeting: "Ahoj z produkcie"
+  appEnv: "prod"
+
+backend:
+  replicas: 3
+
+frontend:
+  replicas: 3
+
+ingress:
+  host: prod.localhost
+```
+
+Helm vnorené kľúče zlučuje, takže image, resources a Secret sa vezmú z `values.yaml`.
+
+```powershell
+helm template demo charts\demo-app -f charts\demo-app\values-prod.yaml | Select-String "replicas|APP_ENV|host:|image:"
+
+kubectl create namespace demo-prod
+kubectl create secret generic backend-secret --from-literal=API_KEY=<hodnota> -n demo-prod
+helm install demo charts\demo-app -f charts\demo-app\values-prod.yaml -n demo-prod
+
+kubectl wait --for=condition=Ready pods --all -n demo-prod --timeout=120s
+helm list -A
+curl.exe http://prod.localhost/api/hello
+curl.exe http://dev.localhost/api/hello
+```
+
+Čo vyšlo:
+
+- v `demo-prod` 6 Podov (3 + 3), `environment: prod` a prod správa
+- dev beží ďalej s `environment: dev`
+- `helm list -A` ukáže dva releasy `demo` v dvoch namespace a Traefik
+- hash ReplicaSetu je v dev aj prode rovnaký, lebo šablóna Podu je rovnaká, líši sa len ConfigMap a počet replík
+
+### Upgrade a rollback
+
+Zmenil som `greeting` vo `values.yaml` a spravil upgrade:
+
+```powershell
+helm upgrade demo charts\demo-app -n demo-dev
+kubectl get pods -n demo-dev
+curl.exe http://dev.localhost/api/hello
+kubectl get configmap demo-config -n demo-dev -o yaml | Select-String APP_GREETING
+```
+
+ConfigMap sa zmenila, ale Pody sa nereštartovali a API vracalo starú správu. Premenné z `envFrom` sa načítajú len pri štarte kontajnera a šablóna Podu zostala rovnaká, takže Deployment nemal dôvod Pody vymeniť.
+
+Opravil som to anotáciou s odtlačkom ConfigMapy v šablóne Podu backendu:
+
+```yaml
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+```
+
+Po ďalšom upgrade vznikol nový ReplicaSet, Pody sa vymenili (rolling update) a API vrátilo novú správu. Frontend sa nezmenil, lebo jeho šablóna je rovnaká.
+
+```powershell
+helm history demo -n demo-dev
+helm rollback demo 1 -n demo-dev
+kubectl get pods -n demo-dev
+curl.exe http://dev.localhost/api/hello
+helm history demo -n demo-dev
+```
+
+- rollback vrátil všetko z revízie 1 naraz, ConfigMap aj Deployment, vrátil sa aj pôvodný hash ReplicaSetu
+- rollback je v histórii nová revízia 4 „Rollback to 1“, história sa neprepisuje
+
+Nakoniec som vrátil `greeting` a spravil upgrade oboch prostredí, aby klaster sedel s chartom v Gite:
+
+```powershell
+helm upgrade demo charts\demo-app -n demo-dev
+helm upgrade demo charts\demo-app -n demo-prod -f charts\demo-app\values-prod.yaml
+```
+
+Pri prode treba vždy `-f`, inak by dostal dev hodnoty.
+
+### Git
+
+Priečinok `k8s/` som zmazal, lebo chart je teraz jediný zdroj pravdy. Staré manifesty zostali v histórii Gitu a v tomto postupe.
+
+```powershell
+git rm -r -f k8s
+git add charts
+git commit -m "feat: helm chart pre appku, dev a prod"
+git push -u origin faza-3
+# PR na GitHube, merge
+git switch main
+git pull
+```
+
+### S čím som si potreboval pomôcť
+
+- čo je šablóna a na čo je chart (zistil som, že šablóna je môj manifest, v ktorom sú premenlivé miesta nahradené `{{ }}` a Helm ich doplní z values, takže dev a prod používajú tie isté šablóny a líšia sa len hodnotami)
+- rozdiel medzi values pri Traefiku a pri mojom charte (zistil som, že pri vlastnom charte píšem šablóny aj `values.yaml` so všetkými hodnotami a `values-prod.yaml` má len rozdiely, ako môj súbor pri Traefiku)
+- `values.yaml` som si nechal pomôcť napísať, hodnoty sú z mojich manifestov z fázy 1
+- `toYaml | nindent` a `quote` (zistil som, že `toYaml` vloží celý blok z values a číslo pri `nindent` je počet medzier, `quote` dá hodnotu do úvodzoviek)
+- prečo `{{ .Release.Name }}` v menách (zistil som, že tak sa dva releasy nebijú a odkazy musia používať ten istý výraz ako cieľ)
+- prečo sa zmena ConfigMapy neprejavila a ako to opraviť cez checksum anotáciu
+- `helm history` a `helm rollback` (zistil som, že rollback je nová revízia a vráti celú appku naraz)
+- prečo zmazať `k8s/` (zistil som, že nejde o bezpečnosť, ale o to, aby bol jeden zdroj pravdy.)
+
+### Problémy
+
+- V šablóne ConfigMapy som mal vymenené strany: vľavo cesty z values a vpravo mená premenných. Vľavo musí byť meno, ktoré číta appka (`APP_GREETING`), vpravo cesta do values (`.Values.config.greeting`). Helm pri neexistujúcej ceste nehlási chybu, len dosadí prázdnu hodnotu.
+- Šablónu Ingressu som skopíroval z `k8s/` a zostali v nej staré mená Services (`backend-service`) bez `host`. Odkaz musí používať ten istý výraz ako šablóna Service (`{{ .Release.Name }}-backend`).
+- `values-prod.yaml` som najprv spravil ako kópiu celého `values.yaml`. Má obsahovať len rozdiely, inak by sa zmena vo `values.yaml` do produ nedostala.
+
+
