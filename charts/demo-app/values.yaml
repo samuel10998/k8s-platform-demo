@@ -34,3 +34,11 @@ frontend:
 ingress:
   className: traefik
   host: dev.localhost
+  
+rbac:
+  viewers:
+    - samuel
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: traefik
