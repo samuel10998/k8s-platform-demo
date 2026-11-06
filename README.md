@@ -261,4 +261,4 @@ kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n demo-dev -- wg
 
 ---
 
-Pri práci som používal AI ako pomoc (vysvetlenia, kontrola chýb). Dockerfiles, YAML a chart som písal sám a všetko som spúšťal a overoval u seba.
+Pri práci som používal AI ako mentora: vysvetľovala mi pojmy, kontrolovala moje súbory a keď som sa zasekol, pomohla mi s kódom aj s príkazmi. Všetko som spúšťal a overoval u seba a každej časti rozumiem. Čo som robil prvýkrát a s čím som potreboval pomôcť, je v [docs/postup.md](docs/postup.md).
