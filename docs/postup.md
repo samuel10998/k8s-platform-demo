@@ -974,3 +974,16 @@ git pull
 - `if` a `range` v Helm šablónach
 - `kubectl auth can-i --as` na overenie práv
 
+---
+
+## Čo som robil prvýkrát
+
+Kubernetes som sa predtým učil na Docker Desktope (Pody, Deploymenty, Services, ConfigMap, Secret). Toto som v tomto projekte robil prvýkrát a potreboval som si s tým pomôcť:
+
+- **kind:** klaster z YAML súboru s viacerými uzlami, presmerovanie portov, zafixovanie verzie Kubernetes a nahratie image cez `kind load`
+- **Helm:** inštalácia hotového chartu s vlastnými hodnotami (Traefik) a vlastný chart so šablónami, `values.yaml` pre dev a prod, `upgrade` a `rollback`
+- **Ingress controller v praxi:** Traefik, smerovanie podľa cesty (`/api`, `/`) a podľa adresy (`dev.localhost`, `prod.localhost`)
+- **dve prostredia z jedného chartu:** dev a prod v samostatných namespace
+- **RBAC:** Role, RoleBinding, vlastné ServiceAccounty bez tokenu a overenie práv cez `kubectl auth can-i --as` predtým toto som poznal len z teórie
+- **securityContext:** `runAsNonRoot`, `allowPrivilegeEscalation`, `drop: ALL`, seccomp
+- **NetworkPolicy:** default-deny, povolenie DNS a povolenie prevádzky len z Traefiku
