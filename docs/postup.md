@@ -22,11 +22,11 @@ helm version
 kubectl version --client
 ```
 
-kind: doplniť, Helm: doplniť, kubectl: 1.34.1
+kind: 0.33.0, Helm: 4.3.1, kubectl: 1.34.1
 
 ### Repo
 
-Na GitHube som vytvoril verejný repozitár `k8s_platform_demo` s README a MIT licenciou a naklonoval som ho do Documents. Appku (backend a frontend) som rozbalil do priečinka `app`.
+Na GitHube som vytvoril verejný repozitár `k8s-platform-demo` s README a MIT licenciou a naklonoval som ho do Documents. Appku (backend a frontend) som rozbalil do priečinka `app`.
 
 Do `.gitignore` som dal `logs/`, lebo tam ukladám nahrávky terminálu a je v nich meno PC a môžu tam byť aj heslá.
 
@@ -190,7 +190,7 @@ kubectl wait --for=condition=Ready pod/web -n np-test --timeout=60s
 # bez politiky
 kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n np-test -- wget -qO- -T 3 http://web
 
-kubectl apply -f C:\Users\samue\Desktop\np-test.yaml
+kubectl apply -f $HOME\Desktop\np-test.yaml
 
 # s politikou
 kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n np-test -- wget -qO- -T 3 http://web
@@ -340,6 +340,156 @@ git pull
 ### Problémy
 
 - V Deploymente backendu som mal 2 chyby: `ports` som nemal ako zoznam a v probes som mal `port` vedľa `httpGet` namiesto pod ním (`path` a `port` patria pod `httpGet`).
+
+---
+
+## Fáza 2 – Traefik a Ingress
+
+Cieľ bol mať appku na jednej adrese `http://localhost`, kde `/api` ide na backend a všetko ostatné na frontend.
+
+### Traefik cez Helm
+
+Traefik je Ingress controller, teda program, ktorý číta Ingressy a podľa nich smeruje prevádzku. Inštaloval som ho cez Helm z hotového chartu do vlastného namespace `traefik`, lebo patrí platforme, nie appke.
+
+```powershell
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+
+# predvolené hodnoty chartu, len na pozretie (mimo repa)
+helm show values traefik/traefik --version 42.3.0 | Set-Content $HOME\Desktop\traefik-default.yaml
+```
+
+Moje hodnoty v `cluster/traefik-values.yaml`:
+
+```yaml
+service:
+  spec:
+    type: NodePort
+
+ports:
+  web:
+    nodePort: 30080
+  websecure:
+    nodePort: 30443
+```
+
+- NodePort namiesto LoadBalancer, lebo kind nemá load balancer a Service by zostala `<pending>`
+- porty 30080 a 30443 sedia s `extraPortMappings` v kind configu (Windows 80 → 30080, 443 → 30443)
+
+Kontrola hodnôt pred inštaláciou a inštalácia:
+
+```powershell
+helm template traefik traefik/traefik --version 42.3.0 -f cluster\traefik-values.yaml | Select-String "type: NodePort|nodePort"
+helm install traefik traefik/traefik --version 42.3.0 -f cluster\traefik-values.yaml -n traefik --create-namespace
+```
+
+### Overenie Traefiku
+
+```powershell
+kubectl get pods -n traefik
+kubectl get svc -n traefik
+kubectl get ingressclass
+curl.exe -i http://localhost
+```
+
+Čo vyšlo:
+
+- Traefik v3.7.17 beží, Pod `1/1 Running`
+- Service `traefik` je `NodePort` s `80:30080/TCP,443:30443/TCP`
+- IngressClass `traefik` existuje
+- `http://localhost` vrátil `404 page not found` od Traefiku, takže cesta Windows → kind → uzol → Traefik funguje, len ešte nemá pravidlo
+
+### Ingress
+
+`k8s/40-ingress.yaml`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo
+  namespace: demo-dev
+spec:
+  ingressClassName: traefik
+  rules:
+   - http:
+      paths:
+       - path: /api
+         pathType: Prefix
+         backend:
+           service:
+             name: backend-service
+             port:
+               number: 80
+       - path: /
+         pathType: Prefix
+         backend:
+           service:
+             name: frontend-service
+             port:
+               number: 80
+```
+
+- pravidlo nemá `host`, takže platí pre každú adresu aj pre `localhost`
+- pri `Prefix` vyhrá dlhšia zhoda, takže `/api/hello` ide na backend a nie na frontend
+- port je port Service (80), nie port kontajnera
+
+```powershell
+kubectl apply --dry-run=client -f k8s\40-ingress.yaml
+kubectl apply -f k8s\40-ingress.yaml
+kubectl get ingress -n demo-dev
+```
+
+`ADDRESS` pri Ingresse je prázdna, pri NodePorte je to normálne.
+
+### Overenie appky
+
+```powershell
+curl.exe -i http://localhost/healthz
+```
+
+Čo vyšlo:
+
+- `http://localhost` (bez portu) ukáže stránku a tlačidlo vypíše správu z ConfigMapy, prostredie `dev`, meno Podu a `Secret: nastavený`
+- pri viacerých kliknutiach sa striedajú oba backend Pody, Traefik posiela priamo na IP Podov a strieda ich
+- `/healthz` vrátil 404 od nginx. Cesta nezačína `/api`, takže išla na frontend. Health endpointy backendu teda nie sú zvonka dostupné, volá ich len kubelet.
+
+![Appka cez Ingress](images/faza_2_ingress_test.png)
+
+### Git
+
+```powershell
+git switch -c faza-2
+git add cluster\traefik-values.yaml k8s\40-ingress.yaml docs\images
+git commit -m "feat: traefik a ingress"
+
+# medzitým som opravil postup.md priamo na GitHube v main, tak som ho stiahol a dal do vetvy
+git switch main
+git pull
+git switch faza-2
+git merge main
+
+git push -u origin faza-2
+# PR na GitHube, merge
+git switch main
+git pull
+```
+
+### S čím som si potreboval pomôcť
+
+- rozdiel medzi Ingressom a Ingress controllerom (zistil som, že Ingress sú len pravidlá a bez controllera, u mňa Traefik, nič nerobí, podobne ako NetworkPolicy bez CNI)
+- prečo má Traefik vlastný namespace (zistil som, že je súčasť platformy a slúži všetkým appkám, appka má vo svojom namespace len svoj Ingress s pravidlami)
+- prečo NodePort a nie LoadBalancer (zistil som, že kind nemá load balancer, v cloude by to bol LoadBalancer s verejnou IP)
+- ako napísať values súbor pre Helm (zistil som, že nemá `apiVersion` ani `kind`, píšem doň len hodnoty, ktoré mením, s celou cestou ku kľúču, a každá úroveň je o 2 medzery hlbšie)
+- kde nájsť mená hodnôt (zistil som, že ich určuje autor chartu a pozerám ich cez `helm show values` pre konkrétnu verziu, typ Service je v tejto verzii pod `service.spec.type`)
+- `helm template` na kontrolu, či sa moje hodnoty naozaj prejavili, ešte pred inštaláciou
+- štruktúra Ingressu (zistil som, že `rules` aj `paths` sú zoznamy a `backend` je pevný názov poľa pre cieľ, nie meno mojej appky)
+- ako ide požiadavka cez Ingress (zistil som, že frontend a backend spolu priamo nekomunikujú, oba volá prehliadač a Ingress ich rozdelí podľa cesty)
+- čo robiť, keď niečo zmením priamo na GitHube (zistil som, že treba `git pull` do `main` a potom `git merge main` do vetvy, na ktorej robím)
+
+### Problémy
+
+- V Ingresse som pri druhej ceste napísal `frontend:` namiesto `backend:`, lebo som si myslel, že `backend` znamená moju backend appku.
 
 ---
 
@@ -605,4 +755,222 @@ git pull
 - Šablónu Ingressu som skopíroval z `k8s/` a zostali v nej staré mená Services (`backend-service`) bez `host`. Odkaz musí používať ten istý výraz ako šablóna Service (`{{ .Release.Name }}-backend`).
 - `values-prod.yaml` som najprv spravil ako kópiu celého `values.yaml`. Má obsahovať len rozdiely, inak by sa zmena vo `values.yaml` do produ nedostala.
 
+---
+
+## Fáza 4 – bezpečnosť: RBAC a NetworkPolicy
+
+Zadanie chce RBAC na obmedzenie prístupu a NetworkPolicy medzi namespace a Podmi. Všetko som dal do chartu, takže to platí pre dev aj prod naraz.
+
+```powershell
+git switch main
+git pull
+git switch -c faza-4
+Start-Transcript -Path .\logs\faza4.txt -Append
+```
+
+### Nové hodnoty vo values.yaml
+
+```yaml
+rbac:
+  viewers:
+    - samuel
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: traefik
+```
+
+### ServiceAccounty
+
+`templates/serviceaccounts.yaml`: vlastný ServiceAccount pre backend a frontend bez tokenu.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-backend
+automountServiceAccountToken: false
+```
+
+(a to isté pre `-frontend`)
+
+Každý Pod dostane predvolene ServiceAccount `default` a token na volanie API servera. Moje appky API nevolajú, takže token je len riziko: keby sa niekto dostal do kontajnera, mal by cestu do klastra. ServiceAccounty nemajú žiadnu Role.
+
+### Role pre ľudí
+
+`templates/rbac.yaml`: Role `{{ .Release.Name }}-viewer` smie len čítať Pody, logy, Services, ConfigMapy, Deploymenty a ReplicaSety (`get`, `list`, `watch`). Secrety nie a nič nemení ani nemaže. RoleBinding ju priradí používateľom z `rbac.viewers`:
+
+```yaml
+subjects:
+  {{- range .Values.rbac.viewers }}
+  - kind: User
+    name: {{ . | quote }}
+    apiGroup: rbac.authorization.k8s.io
+  {{- end }}
+```
+
+`range` urobí z každého mena v zozname jeden subjekt, `.` je aktuálna položka.
+
+### securityContext a ServiceAccount v Deploymentoch
+
+V šablóne Podu backendu aj frontendu:
+
+```yaml
+    spec:
+      serviceAccountName: {{ .Release.Name }}-backend
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          ...
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+```
+
+- `runAsNonRoot`: Kubernetes nespustí kontajner, ktorý by bežal ako root. Tu sa vyplatilo `USER 10001` z fázy 0, číselné UID sa dá overiť.
+- `allowPrivilegeEscalation: false`: proces nemôže získať viac práv, ako má
+- `drop: ALL`: odobraté všetky Linux capabilities, appka žiadne nepotrebuje
+- `seccompProfile: RuntimeDefault`: obmedzí systémové volania na bežnú sadu
+
+### Kontrola a nasadenie
+
+```powershell
+cd charts\demo-app
+helm lint .
+helm template demo . -n demo-dev -s templates/serviceaccounts.yaml -s templates/rbac.yaml -s templates/backend.yaml -s templates/frontend.yaml
+helm template demo . -n demo-prod -f values-prod.yaml -s templates/serviceaccounts.yaml -s templates/rbac.yaml -s templates/backend.yaml -s templates/frontend.yaml
+
+helm upgrade demo . -n demo-dev
+helm upgrade demo . -n demo-prod -f values-prod.yaml
+kubectl rollout status deployment/demo-backend -n demo-prod
+kubectl rollout status deployment/demo-frontend -n demo-prod
+```
+
+Pody sa vymenili (rolling update), všetky skončili `1/1`, žiadny nespadol na `runAsNonRoot`. Frontend mal v dev aj prode rovnaký hash ReplicaSetu, backend nie, lebo jeho šablóna obsahuje checksum ConfigMapy a ConfigMapy sa v prostrediach líšia.
+
+### Overenie RBAC
+
+```powershell
+kubectl exec -n demo-dev deploy/demo-backend -- ls /var/run/secrets/kubernetes.io/serviceaccount
+kubectl auth can-i list pods -n demo-prod --as samuel
+kubectl auth can-i get secrets -n demo-prod --as samuel
+kubectl auth can-i delete pods -n demo-prod --as samuel
+kubectl auth can-i list pods -n traefik --as samuel
+kubectl exec -n demo-dev deploy/demo-backend -- id
+```
+
+| Test | Výsledok |
+|---|---|
+| token v kontajneri | `No such file or directory` |
+| samuel: list pods v demo-prod | `yes` |
+| samuel: get secrets v demo-prod | `no` |
+| samuel: delete pods v demo-prod | `no` |
+| samuel: list pods v traefik | `no`, Role platí len vo svojom namespace |
+| `id` v backende | `uid=10001(appuser)` |
+
+Kubernetes používateľov neukladá, `--as` len overí práva pre dané meno.
+
+### NetworkPolicy
+
+`templates/networkpolicy.yaml`, celé v `{{- if .Values.networkPolicy.enabled }}` ... `{{- end }}`. Kto s kým potrebuje hovoriť:
+
+| Odkiaľ → kam | Povolené? | Prečo |
+|---|---|---|
+| Traefik → frontend :8080 | áno | stránka |
+| Traefik → backend :8000 | áno | `/api` |
+| frontend → backend | nie | backend volá prehliadač cez Traefik |
+| čokoľvek iné → appka | nie | |
+| appka → DNS v kube-system :53 | áno | preklad mien |
+| appka → čokoľvek iné | nie | appky nič nevolajú |
+
+Štyri politiky:
+
+1. `{{ .Release.Name }}-default-deny`: `podSelector: {}` (všetky Pody), `policyTypes: Ingress, Egress`, bez pravidiel = zakáž všetko
+2. `{{ .Release.Name }}-allow-dns`: všetky Pody, egress do `kube-system` na port 53 UDP aj TCP
+3. `{{ .Release.Name }}-backend-from-ingress`: Pody backendu, ingress z namespace `traefik` na port 8000
+4. `{{ .Release.Name }}-frontend-from-ingress`: Pody frontendu, ingress z namespace `traefik` na port 8080
+
+Príklad politiky 3:
+
+```yaml
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: backend
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace | quote }}
+      ports:
+        - protocol: TCP
+          port: 8000
+```
+
+- `kubernetes.io/metadata.name` je štítok, ktorý dostane každý namespace automaticky
+- port je port Podu (8000), nie Service (80)
+- politiky sa sčítavajú, default-deny nič nepovoľuje a ostatné pridávajú výnimky
+- prevádzka z vlastného uzla (kubelet probes) je vždy povolená, preto Pody zostali Ready
+
+```powershell
+helm template demo . -s templates/networkpolicy.yaml
+helm upgrade demo . -n demo-dev
+helm upgrade demo . -n demo-prod -f values-prod.yaml
+kubectl get networkpolicy -n demo-dev
+kubectl get networkpolicy -n demo-prod
+```
+
+Pody sa tentoraz nereštartovali, NetworkPolicy sú samostatné objekty a kindnet ich vynucuje hneď.
+
+### Overenie NetworkPolicy
+
+```powershell
+curl.exe http://dev.localhost/api/hello
+curl.exe http://prod.localhost/api/hello
+kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n default -- wget -qO- -T 3 http://demo-backend.demo-dev
+kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n demo-dev -- wget -qO- -T 3 http://demo-backend
+kubectl exec -n demo-dev deploy/demo-backend -- python -c "import socket; print(socket.gethostbyname('demo-frontend'))"
+kubectl exec -n demo-dev deploy/demo-backend -- python -c "import urllib.request; urllib.request.urlopen('http://demo-frontend', timeout=3)"
+```
+
+| Test | Výsledok | Čo to dokazuje |
+|---|---|---|
+| `dev.localhost`, `prod.localhost` | JSON z oboch | Traefik je povolený |
+| busybox z `default` → backend | `download timed out` | cudzí namespace sa nedostane k appke |
+| busybox z `demo-dev` → backend | `download timed out` | ani sused v tom istom namespace |
+| backend → DNS `demo-frontend` | `10.96.181.38` | DNS funguje |
+| backend → `http://demo-frontend` | `timed out` | odchádzajúca prevádzka je zakázaná |
+
+### Git
+
+```powershell
+cd ..\..
+git add charts docs
+git commit -m "feat: rbac, serviceaccounty, securityContext a networkpolicy"
+git push -u origin faza-4
+# PR na GitHube, merge
+git switch main
+git pull
+```
+
+### S čím som si potreboval pomôcť
+
+- NetworkPolicy som písal prvýkrát (zistil som, že najprv sa všetko zakáže cez default-deny a potom sa povolí len to, čo appka naozaj potrebuje, politiky sa sčítavajú)
+- kto s kým musí komunikovať (zistil som, že frontend s backendom priamo nehovorí, takže medzi nimi netreba žiadne pravidlo)
+- prečo povoliť DNS pri zákaze odchádzajúcej prevádzky (zistil som, že inak by Pody nevedeli preložiť mená Services)
+- `namespaceSelector` so štítkom `kubernetes.io/metadata.name`, ktorý má každý namespace automaticky
+- rozdiel medzi jednou položkou a dvoma položkami vo `from` (zistil som, že v jednej položke platí A ZÁROVEŇ, dve položky znamenajú ALEBO)
+- prečo appky nepotrebujú token ServiceAccountu a ako ho vypnúť
+- `securityContext` a prečo `runAsNonRoot` potrebuje číselné UID
+- `if` a `range` v Helm šablónach
+- `kubectl auth can-i --as` na overenie práv
 
