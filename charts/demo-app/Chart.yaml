@@ -2,5 +2,5 @@ apiVersion: v2
 name: demo-app
 description: Helm chart pre demo appku – frontend (nginx), backend (Flask) a Ingress.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "a5ef2ea"
