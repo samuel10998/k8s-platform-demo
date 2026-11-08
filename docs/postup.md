@@ -1008,3 +1008,236 @@ Všetko odtiaľto nižšie je len vo vetve `main-bonus`. Sú to voliteľné čas
 Fázové vetvy idú cez PR do `main-bonus`, nie do `main`.
 
 ---
+
+## Fáza 6 – GitOps cez Argo CD
+
+Cieľ bol, aby appku do klastra nenasadzoval `helm upgrade` z môjho PC, ale Argo CD podľa toho, čo je v Gite. Bonusové fázy robím vo vetve `main-bonus`, `main` zostal tak, ako som ho odovzdal.
+
+```powershell
+git switch main
+git pull
+git switch -c main-bonus
+git push -u origin main-bonus
+git switch -c faza-6
+Start-Transcript -Path .\logs\faza6.txt -Append
+```
+
+PR z fázových vetiev odteraz idú do `main-bonus`, nie do `main`.
+
+### Inštalácia Argo CD
+
+Argo CD som nainštaloval cez Helm do vlastného namespace `argocd`, rovnako ako Traefik, lebo patrí platforme.
+
+```powershell
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+helm search repo argo/argo-cd
+helm install argocd argo/argo-cd --version 10.15.0 -n argocd --create-namespace --wait
+kubectl get pods -n argocd
+```
+
+- chart 10.15.0, Argo CD v3.6.1
+- `helm repo add` a `helm repo update` sa ukladajú len na mojom PC, do klastra ide chart až pri `helm install`
+- `--wait` počká, kým sú Pody Ready
+- beží 7 Podov, najdôležitejšie sú `argocd-server` (webové rozhranie), `argocd-repo-server` (stiahne repo a vyrenderuje chart) a `argocd-application-controller-0` (porovnáva Git s klastrom a robí sync)
+
+### Webové rozhranie a prihlásenie
+
+```powershell
+kubectl get svc -n argocd
+kubectl port-forward svc/argocd-server 8081:443 -n argocd
+```
+
+Port 8081, aby sa to nebilo s frontendom z fázy 1 na 8080. V prehliadači `https://localhost:8081`. Varovanie o certifikáte je v poriadku, Argo CD má vlastný certifikát, ktorý prehliadač nepozná.
+
+Úvodné heslo pre `admin` je v Secrete. Hodnota je v base64 a `base64 -d` z návodu v PowerShelli nefunguje:
+
+```powershell
+kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}"
+[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("<hodnota>"))
+```
+
+Po prihlásení som si heslo zmenil (User Info → Update Password, musí mať 8 až 32 znakov) a úvodný Secret som zmazal, lebo sa už nepoužíva:
+
+```powershell
+kubectl delete secret argocd-initial-admin-secret -n argocd
+```
+
+### Prechod z Helmu na Argo CD
+
+Aby appku nespravovali dvaja naraz, staré Helm releasy som odinštaloval:
+
+```powershell
+helm uninstall demo -n demo-dev
+helm uninstall demo -n demo-prod
+helm list -A
+kubectl get all,configmap,secret,networkpolicy -n demo-dev
+```
+
+Zostali len `traefik` a `argocd` a v namespace len `backend-secret` a `kube-root-ca.crt`. Namespace a Secret som vytvoril ručne, takže ich Helm nezmazal.
+
+### Application
+
+V repe je nový priečinok `argocd/` s dvoma súbormi. `argocd/app-dev.yaml`:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/samuel10998/k8s-platform-demo.git
+    targetRevision: main-bonus
+    path: charts/demo-app
+    helm:
+      releaseName: demo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+- Application patrí do namespace `argocd`, nie do namespace appky
+- `targetRevision` je vetva, ktorú Argo CD sleduje
+- `releaseName: demo`, inak by `.Release.Name` bolo meno Application a objekty by sa volali `demo-dev-backend`
+- `https://kubernetes.default.svc` je klaster, v ktorom beží samotné Argo CD
+- `prune` zmaže z klastra to, čo z Gitu zmizlo, `selfHeal` vráti ručné zmeny podľa Gitu
+
+`argocd/app-prod.yaml` je rovnaký, len s menom `demo-prod`, namespace `demo-prod` a prod values:
+
+```yaml
+    helm:
+      releaseName: demo
+      valueFiles:
+        - values-prod.yaml
+```
+
+Cesta vo `valueFiles` je relatívna k `path`, teda len meno súboru. Je to to isté ako `-f values-prod.yaml` pri `helm upgrade`.
+
+```powershell
+kubectl apply -f argocd\
+kubectl get applications -n argocd
+```
+
+### Ingress zostal Progressing
+
+Obe Application boli `Synced`, ale aj po 5 minútach `Progressing`. Pody bežali, problém bol Ingress: Argo CD ho považuje za zdravý až vtedy, keď má vyplnený `ADDRESS`. Ten zapisuje Traefik a berie ho zo svojej Service, ktorá je NodePort a žiadnu externú adresu nemá.
+
+Opravil som to v nastavení Traefiku, nie v charte appky. Chart Traefiku nemá na IP adresu vlastnú hodnotu, preto som použil `additionalArguments`. `cluster/traefik-values.yaml` má navyše:
+
+```yaml
+providers:
+  kubernetesIngress:
+    publishedService:
+      enabled: false
+
+additionalArguments:
+  - "--providers.kubernetesingress.ingressendpoint.ip=127.0.0.1"
+```
+
+```powershell
+helm show values traefik/traefik --version 42.3.0 | Select-String -Context 0,20 "kubernetesIngress:"
+helm template traefik traefik/traefik --version 42.3.0 -f cluster\traefik-values.yaml | Select-String "ingressendpoint"
+helm upgrade traefik traefik/traefik --version 42.3.0 -f cluster\traefik-values.yaml -n traefik
+kubectl get ingress -n demo-dev
+kubectl get applications -n argocd
+```
+
+Ingress dostal `ADDRESS 127.0.0.1` a obe Application sú `Synced` a `Healthy`.
+
+### Overenie nasadenia
+
+```powershell
+curl.exe http://dev.localhost/api/hello
+curl.exe http://prod.localhost/api/hello
+kubectl get pods -n demo-prod
+```
+
+- dev aj prod vracajú svoje prostredie a správu, takže `valueFiles` funguje
+- v prode 6 Podov, objekty sa volajú `demo-backend` a `demo-frontend`, takže `releaseName` funguje
+- `secret_configured: true`, appka našla Secret, ktorý nie je v Gite
+
+![Aplikácie v Argo CD](images/faza_6_argocd_apps.png)
+
+![Strom objektov demo-prod](images/faza_6_argocd_tree.png)
+
+```powershell
+git add argocd cluster\traefik-values.yaml docs\images
+git commit -m "feat: argo cd application pre dev a prod"
+git push -u origin faza-6
+```
+
+### Test GitOps: zmena cez Git
+
+Zmenil som `greeting` vo `values.yaml` na „Ahoj z Argo CD“, pushol do `faza-6` a spravil PR do `main-bonus`.
+
+```powershell
+git add charts
+git commit -m "test: zmena greeting cez argo cd"
+git push
+# PR faza-6 → main-bonus, merge, v Argo CD REFRESH
+curl.exe http://dev.localhost/api/hello
+curl.exe http://prod.localhost/api/hello
+kubectl get pods -n demo-dev
+```
+
+- push do `faza-6` sám nič nespravil, zmena sa nasadila až po merge do `main-bonus`
+- dev vrátil novú správu bez jediného `helm` alebo `kubectl apply`
+- prod sa nezmenil, lebo má vlastný `greeting` vo `values-prod.yaml`. Argo CD videlo nový commit, ale vyrenderovaný YAML pre prod bol rovnaký, takže nič nenasadilo.
+- backend Pody sa vymenili vďaka checksum anotácii, frontend zostal
+
+Argo CD kontroluje Git každé 3 minúty, tlačidlo REFRESH to urobí hneď.
+
+### Test selfHeal
+
+```powershell
+kubectl scale deployment/demo-backend --replicas=5 -n demo-dev
+kubectl get pods -n demo-dev -w
+kubectl get deployment demo-backend -n demo-dev
+```
+
+Do 10 sekúnd boli 3 nové Pody `Terminating` a Deployment sa vrátil na `2/2`, lebo v Gite sú 2 repliky. Ručná zmena v klastri pri zapnutom `selfHeal` nevydrží.
+
+### Rollback cez Git
+
+Pri GitOps sa rollback robí v Gite, nie `helm rollback`. Na vrátenie commitu som použil `git revert`, ktorý vytvorí nový commit s opačnou zmenou a históriu neprepíše.
+
+```powershell
+git switch main-bonus
+git pull
+git switch faza-6
+git merge main-bonus
+git log --oneline -5
+git revert f0526cb --no-edit
+git log --oneline -3
+Select-String "greeting" charts\demo-app\values.yaml
+git push
+# PR faza-6 → main-bonus, merge, v Argo CD REFRESH
+curl.exe http://dev.localhost/api/hello
+kubectl get pods -n demo-dev
+```
+
+- dev vrátil znova „Ahoj z config mapy“
+- backend Pody majú znova hash `77c59ddfdd`, rovnaký ako po prvom nasadení, lebo šablóna Podu je znova rovnaká
+- `main` zostal na odovzdanom commite, bonus ho nezasiahol
+
+### S čím som si potreboval pomôcť
+
+- Argo CD som robil prvýkrát (zistil som, že pri GitOps je zdrojom pravdy Git a Argo CD v klastri stále porovnáva Git s klastrom a upravuje klaster podľa Gitu, nie naopak)
+- rozdiel medzi CI a CD (zistil som, že CI postaví a otestuje image a CD ho nasadí, u mňa CD robí Argo CD a CI bude GitHub Actions)
+- rozdiel medzi `selfHeal` a `prune` (zistil som, že `selfHeal` vráti ručné zmeny v klastri a `prune` zmaže objekty, ktoré z Gitu zmizli)
+- štruktúra Application (zistil som, že `repoURL` je adresa repa a vetva ide zvlášť do `targetRevision`, `valueFiles` je zoznam súborov relatívne k `path`)
+- prečo `releaseName` (zistil som, že inak by `.Release.Name` bolo meno Application)
+- pokračovanie príkazu na ďalší riadok v PowerShelli (zistil som, že `\` je z Linuxu, v PowerShelli je to `` ` ``)
+- `git revert` (zistil som, že na zdieľanej vetve sa zmena vracia novým commitom, nie prepisovaním histórie)
+
+### Problémy
+
+- Ingress zostal v Argo CD `Progressing`, lebo pri Traefiku cez NodePort nemal vyplnený `ADDRESS`. Pre Kubernetes to nevadí a appka fungovala, ale Argo CD bez adresy nepovažuje Ingress za zdravý. Opravil som to v Traefiku cez `ingressendpoint.ip`, nie v charte appky, lebo adresu zapisuje Ingress controller.
+- Do `valueFiles` som najprv dal cestu k chartu namiesto súboru s hodnotami. Argo CD už vie, kde je chart, z `path`, a vo `valueFiles` hľadá súbory v tomto priečinku.
