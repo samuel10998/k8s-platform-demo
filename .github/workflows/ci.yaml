@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main-bonus
+    paths:
+      - "app/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Stiahnutie repozitára
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Kontrola Helm chartu
+      - name: Helm lint
+        run: helm lint charts/demo-app
+
+      # 3. Vytvorenie krátkeho tagu
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      # 4. Prihlásenie do GHCR
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 5. Build a push backendu
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: app/backend
+          push: true
+          tags: ghcr.io/samuel10998/demo-backend:${{ env.TAG }}
+
+      # 6. Build a push frontendu
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: app/frontend
+          push: true
+          tags: ghcr.io/samuel10998/demo-frontend:${{ env.TAG }}
+
+      # 7. Aktualizácia chartu
+      - name: Update Helm chart
+        run: |
+          yq -i '.backend.image.repository = "ghcr.io/samuel10998/demo-backend"' charts/demo-app/values.yaml
+          yq -i '.backend.image.tag = "${{ env.TAG }}"' charts/demo-app/values.yaml
+          yq -i '.frontend.image.repository = "ghcr.io/samuel10998/demo-frontend"' charts/demo-app/values.yaml
+          yq -i '.frontend.image.tag = "${{ env.TAG }}"' charts/demo-app/values.yaml
+          yq -i '.version = "0.1.${{ github.run_number }}"' charts/demo-app/Chart.yaml
+          yq -i '.appVersion = "${{ env.TAG }}"' charts/demo-app/Chart.yaml
+
+      # 8. Balík chartu do GHCR
+      - name: Package and push chart
+        run: |
+          helm package charts/demo-app -d dist
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm push dist/demo-app-0.1.${{ github.run_number }}.tgz oci://ghcr.io/samuel10998/charts
+
+      # 9. Commit späť do repa
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add charts/demo-app
+          git commit -m "ci: image ${{ env.TAG }}"
+          git push
