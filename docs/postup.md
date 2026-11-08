@@ -987,3 +987,24 @@ Kubernetes som sa predtým učil na Docker Desktope (Pody, Deploymenty, Services
 - **RBAC:** Role, RoleBinding, vlastné ServiceAccounty bez tokenu a overenie práv cez `kubectl auth can-i --as` predtým toto som poznal len z teórie
 - **securityContext:** `runAsNonRoot`, `allowPrivilegeEscalation`, `drop: ALL`, seccomp
 - **NetworkPolicy:** default-deny, povolenie DNS a povolenie prevádzky len z Traefiku
+
+---
+
+## Fáza 5 – README
+
+Fáza 5 bola dokumentácia. Napísal som README s návrhom riešenia, bezpečnosťou, inštaláciou a použitím a doplnil som diagram architektúry. Postup k nej nemám, lebo išlo len o text a obrázky. Výsledok je v [README.md](../README.md).
+
+Tu končí to, čo som odovzdal. Vetva `main` zostáva v tomto stave.
+
+---
+
+# Bonus: GitOps a CI/CD
+
+Všetko odtiaľto nižšie je len vo vetve `main-bonus`. Sú to voliteľné časti zo zadania, ktoré som robil po odovzdaní:
+
+- **fáza 6:** GitOps cez Argo CD, appku nasadzuje Argo CD podľa Gitu namiesto `helm upgrade` z môjho PC
+- **fáza 7:** CI/CD cez GitHub Actions, pipeline postaví image a zapíše nový tag do chartu
+
+Fázové vetvy idú cez PR do `main-bonus`, nie do `main`.
+
+---
