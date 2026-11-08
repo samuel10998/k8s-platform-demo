@@ -1,7 +1,7 @@
 # Predvolené hodnoty = dev prostredie
 
 config:
-  greeting: "Ahoj z config mapy"
+  greeting: "Ahoj z Argo CD"
   appEnv: "dev"
 
 backend:
