@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: 
+  name: demo-dev
+  namespace: argocd
+spec:
+  project: default
+  source: 
+    repoURL: https://github.com/samuel10998/k8s-platform-demo.git
+    targetRevision: main-bonus
+    path: charts/demo-app
+    helm:
+      releaseName: demo
+  destination: 
+    server: https://kubernetes.default.svc
+    namespace: demo-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

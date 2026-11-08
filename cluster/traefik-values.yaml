@@ -7,3 +7,11 @@ ports:
     nodePort: 30080
   websecure:
     nodePort: 30443
+
+providers:
+  kubernetesIngress:
+    publishedService:
+      enabled: false
+      
+additionalArguments:
+  - "--providers.kubernetesingress.ingressendpoint.ip=127.0.0.1"
