@@ -994,7 +994,7 @@ Kubernetes som sa predtým učil na Docker Desktope (Pody, Deploymenty, Services
 
 Fáza 5 bola dokumentácia. Napísal som README s návrhom riešenia, bezpečnosťou, inštaláciou a použitím a doplnil som diagram architektúry. Postup k nej nemám, lebo išlo len o text a obrázky. Výsledok je v [README.md](../README.md).
 
-Tu končí to, čo som odovzdal. Vetva `main` zostáva v tomto stave.
+Tu končí to, čo som odovzdal. Vetva(branch) `main` zostáva v tomto stave.
 
 ---
 
