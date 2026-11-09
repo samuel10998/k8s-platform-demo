@@ -2,7 +2,9 @@
 
 Kubernetes prostredie pre jednoduchú webovú appku (frontend + backend). Klaster beží lokálne cez kind, appku nasadzujem vlastným Helm chartom do dvoch prostredí (dev a prod) a do klastra sa prichádza cez Traefik.
 
-**Použité technológie:** kind (Kubernetes 1.35.8), Docker, Helm, Traefik, RBAC, NetworkPolicy, Python (Flask), nginx
+> **Toto je vetva `main-bonus`.** Oproti odovzdanej vetve [`main`](https://github.com/samuel10998/k8s-platform-demo/tree/main) má navyše voliteľné časti zo zadania: **GitOps cez Argo CD** a **CI cez GitHub Actions**. Appku tu nenasadzujem cez `helm install` z PC, ale nasadzuje ju Argo CD podľa Gitu a image stavia pipeline.
+
+**Použité technológie:** kind (Kubernetes 1.35.8), Docker, Helm, Traefik, RBAC, NetworkPolicy, Argo CD, GitHub Actions, GitHub Container Registry, Python (Flask), nginx
 
 ![Appka cez Ingress](docs/images/faza_4_final.png)
 
@@ -13,6 +15,7 @@ Celý postup, príkazy a problémy, ktoré som riešil, sú v [docs/postup.md](d
 ## Obsah
 
 - [Dizajn](#dizajn)
+- [GitOps a CI](#gitops-a-ci)
 - [Bezpečnosť](#bezpečnosť)
 - [Štruktúra repa](#štruktúra-repa)
 - [Inštalácia](#inštalácia)
@@ -39,6 +42,9 @@ Frontend a backend spolu priamo nekomunikujú. Prehliadač si najprv stiahne str
 | frontend | `app/frontend` | statická stránka v nginx, port 8080 |
 | backend | `app/backend` | Flask appka, port 8000, má endpointy `/api/hello`, `/healthz` a `/readyz` |
 | Helm chart `demo-app` | `charts/demo-app` | všetky Kubernetes objekty appky |
+| Argo CD | namespace `argocd` | nasadzuje chart do dev a prod podľa vetvy `main-bonus` |
+| Application | `argocd/` | dve Application pre Argo CD, `demo-dev` a `demo-prod` |
+| pipeline | `.github/workflows/ci.yaml` | GitHub Actions: build image, push do GHCR a nový tag do chartu |
 
 ### Dev a prod
 
@@ -50,6 +56,7 @@ Obe prostredia používajú ten istý chart. Líšia sa len hodnotami, `values-p
 | adresa | `http://dev.localhost` | `http://prod.localhost` |
 | počet Podov backend / frontend | 2 / 2 | 3 / 3 |
 | `APP_ENV` | `dev` | `prod` |
+| Application v Argo CD | `demo-dev` | `demo-prod` (+ `values-prod.yaml`) |
 
 ### Škálovanie a dostupnosť
 
@@ -57,7 +64,30 @@ Obe prostredia používajú ten istý chart. Líšia sa len hodnotami, `values-p
 - Pody majú nastavené `requests` a `limits` pre CPU a pamäť
 - **readiness probe** (`/readyz`): Pod dostane požiadavky, až keď je pripravený. Backend bez `API_KEY` pripravený nie je.
 - **liveness probe** (`/healthz`): keď appka zamrzne, Kubernetes ju reštartuje
-- keď zmením konfiguráciu a spravím `helm upgrade`, Pody sa vymenia samy (v šablóne je odtlačok ConfigMapy)
+- keď sa zmení konfigurácia, Pody sa po nasadení vymenia samy (v šablóne je odtlačok ConfigMapy)
+- pri novom image ide rolling update: staré Pody bežia, kým nie sú nové Ready, takže appka nevypadne
+
+---
+
+## GitOps a CI
+
+![GitOps a CI](docs/images/main-bonus-diagram.png)
+
+**CI (GitHub Actions):** pri merge zmeny v `app/` do `main-bonus` pipeline:
+
+1. skontroluje chart (`helm lint`)
+2. postaví image backendu a frontendu a pushne ich do GitHub Container Registry s tagom z hashu commitu (napr. `a5ef2ea`)
+3. zapíše nový tag do `values.yaml` a zvýši verziu chartu
+4. zabalí chart (`helm package`) a pushne ho do GHCR
+5. commitne zmenu chartu späť do `main-bonus`
+
+**CD (Argo CD):** sleduje `charts/demo-app` vo vetve `main-bonus`. Keď sa tam niečo zmení, či už nový tag od pipeline alebo moja zmena vo values, nasadí to do klastra. Nič nespúšťam ručne.
+
+- `selfHeal`: ručnú zmenu v klastri (napr. `kubectl scale`) Argo CD vráti podľa Gitu
+- `prune`: objekt, ktorý zmizne z Gitu, zmaže aj z klastra
+- rollback sa robí v Gite cez `git revert`
+
+![Aplikácie v Argo CD](docs/images/faza_6_argocd_apps.png)
 
 ---
 
@@ -89,22 +119,34 @@ Endpointy `/healthz` a `/readyz` nie sú zvonka dostupné, Ingress púšťa na b
 - všetky image majú presnú verziu, nie `latest`
 - Secret nie je v Gite, vytvára sa príkazom pri inštalácii
 
+### Pipeline a Argo CD
+
+- pipeline používa len dočasný `GITHUB_TOKEN` s právami `contents: write` a `packages: write`, žiadne vlastné heslá
+- úvodné heslo Argo CD som po prvom prihlásení zmenil a Secret s ním zmazal
+- Argo CD je dostupné len cez `kubectl port-forward`, nie cez Ingress
+
 ---
 
 ## Štruktúra repa
 
 ```
 k8s-platform-demo/
+├── .github/
+│   └── workflows/
+│       └── ci.yaml         # GitHub Actions pipeline
 ├── app/
 │   ├── backend/            # Flask appka + Dockerfile
 │   └── frontend/           # stránka + Dockerfile
+├── argocd/
+│   ├── app-dev.yaml        # Application pre dev
+│   └── app-prod.yaml       # Application pre prod
 ├── cluster/
 │   ├── kind-config.yaml    # nastavenie klastra
 │   └── traefik-values.yaml # moje hodnoty pre Traefik
 ├── charts/
 │   └── demo-app/           # Helm chart appky
 │       ├── Chart.yaml
-│       ├── values.yaml         # dev
+│       ├── values.yaml         # dev (tag image mení pipeline)
 │       ├── values-prod.yaml    # rozdiely pre prod
 │       └── templates/          # šablóny
 └── docs/
@@ -126,14 +168,13 @@ k8s-platform-demo/
 
 Na Windowse sa kind a Helm dajú nainštalovať cez `winget install Kubernetes.kind` a `winget install Helm.Helm`. Príkazy nižšie sú pre PowerShell.
 
-### 1. Repo a image
+Image si stavať netreba. Postavila ich pipeline a sú verejne v `ghcr.io/samuel10998`.
+
+### 1. Repo
 
 ```powershell
-git clone https://github.com/samuel10998/k8s-platform-demo.git
+git clone -b main-bonus https://github.com/samuel10998/k8s-platform-demo.git
 cd k8s-platform-demo
-
-docker build -t backend:0.1.0 app/backend
-docker build -t frontend:0.1.0 app/frontend
 ```
 
 ### 2. Klaster
@@ -141,10 +182,7 @@ docker build -t frontend:0.1.0 app/frontend
 ```powershell
 kind create cluster --config cluster/kind-config.yaml
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
-kind load docker-image backend:0.1.0 frontend:0.1.0 --name aspecta
 ```
-
-Uzly kind nevidia image z Dockeru, preto ich treba nahrať cez `kind load`.
 
 ### 3. Traefik
 
@@ -155,25 +193,49 @@ helm install traefik traefik/traefik --version 42.3.0 -f cluster/traefik-values.
 kubectl wait --for=condition=Ready pods --all -n traefik --timeout=120s
 ```
 
-### 4. Appka – dev
+### 4. Argo CD
+
+```powershell
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+helm install argocd argo/argo-cd --version 10.15.0 -n argocd --create-namespace --wait
+```
+
+### 5. Namespace a Secrety
+
+Secret nie je v Gite, preto ho Argo CD ani Helm nevytvorí a treba ho vytvoriť ručne v oboch prostrediach:
 
 ```powershell
 kubectl create namespace demo-dev
 kubectl create secret generic backend-secret --from-literal=API_KEY=<hodnota> -n demo-dev
-helm install demo charts/demo-app -n demo-dev
-kubectl wait --for=condition=Ready pods --all -n demo-dev --timeout=120s
-```
 
-### 5. Appka – prod
-
-```powershell
 kubectl create namespace demo-prod
 kubectl create secret generic backend-secret --from-literal=API_KEY=<hodnota> -n demo-prod
+```
+
+Namespace a Secret vytváram pred nasadením chartu, lebo Secret nemá byť v Gite a ten istý chart ide do dvoch namespace.
+
+### 6. Appka cez Argo CD
+
+```powershell
+kubectl apply -f argocd/
+kubectl get applications -n argocd
+```
+
+Po chvíli majú byť obe Application `Synced` a `Healthy`. Argo CD si chart stiahne z GitHubu a nasadí ho samo.
+
+### Bez Argo CD, len Helm
+
+Takto som appku nasadzoval vo fázach 3 až 5 (vetva `main`). Namiesto krokov 4 a 6:
+
+```powershell
+helm install demo charts/demo-app -n demo-dev
 helm install demo charts/demo-app -n demo-prod -f charts/demo-app/values-prod.yaml
+kubectl wait --for=condition=Ready pods --all -n demo-dev --timeout=120s
 kubectl wait --for=condition=Ready pods --all -n demo-prod --timeout=120s
 ```
 
-Namespace a Secret vytváram pred inštaláciou chartu, lebo Secret nemá byť v Gite a ten istý chart ide do dvoch namespace.
+Obe možnosti naraz nepoužívaj. Jednu appku má spravovať buď Helm, alebo Argo CD, inak by si navzájom prepisovali zmeny.
 
 ### Zmazanie
 
@@ -197,14 +259,34 @@ curl.exe http://dev.localhost/api/hello
 curl.exe http://prod.localhost/api/hello
 ```
 
-### Čo beží
+### Argo CD
 
 ```powershell
-helm list -A
-kubectl get pods,svc,ingress,networkpolicy -n demo-dev
+kubectl port-forward svc/argocd-server 8081:443 -n argocd
 ```
 
-### Zmena a návrat späť
+V prehliadači `https://localhost:8081` (varovanie o certifikáte je v poriadku), používateľ `admin`. Úvodné heslo:
+
+```powershell
+kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}"
+[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("<hodnota>"))
+```
+
+Po prihlásení si heslo zmeň (User Info → Update Password) a úvodný Secret zmaž.
+
+### Ako nasadiť zmenu
+
+| Čo meníš | Čo urobíš | Čo sa stane |
+|---|---|---|
+| kód appky (`app/`) | PR a merge do `main-bonus` | pipeline postaví image a zapíše tag, Argo CD nasadí |
+| chart alebo values (`charts/`) | PR a merge do `main-bonus` | Argo CD nasadí priamo, pipeline sa nespustí |
+| vrátenie zmeny | `git revert`, PR a merge | Argo CD nasadí predošlý stav |
+
+Po behu pipeline si stiahni jej commit (`git pull` v `main-bonus`), inak budeš mať starý `values.yaml`.
+
+Behy pipeline: [Actions → CI](https://github.com/samuel10998/k8s-platform-demo/actions/workflows/ci.yaml)
+
+Pri variante bez Argo CD sa zmena nasadzuje a vracia cez Helm:
 
 ```powershell
 # po zmene v charte alebo vo values
@@ -214,6 +296,15 @@ helm upgrade demo charts/demo-app -n demo-prod -f charts/demo-app/values-prod.ya
 # história a návrat na staršiu verziu
 helm history demo -n demo-dev
 helm rollback demo <revízia> -n demo-dev
+```
+
+### Čo beží
+
+```powershell
+helm list -A                                   # Traefik a Argo CD (appku pri Argo CD helm list neukáže)
+kubectl get applications -n argocd
+kubectl get pods,svc,ingress,networkpolicy -n demo-dev
+kubectl get deployment demo-backend -n demo-dev -o jsonpath="{.spec.template.spec.containers[0].image}"
 ```
 
 ### Overenie bezpečnosti
@@ -248,11 +339,21 @@ kubectl run test --rm -it --restart=Never --image=busybox:1.37 -n demo-dev -- wg
 | namespace a Secret mimo chartu | chart ide do rôznych namespace a Secret nemá byť v Gite |
 | `values-prod.yaml` len s rozdielmi | zmena vo `values.yaml` sa prejaví v oboch prostrediach |
 | `USER 10001` v Dockerfile ako číslo | Kubernetes vie overiť, že kontajner nebeží ako root, len pri čísle |
+| Argo CD (pull) namiesto `helm upgrade` z pipeline (push) | pipeline na GitHube sa k môjmu kind nedostane, Argo CD si zmenu stiahne samo. Git je jediný zdroj pravdy. |
+| GitHub Container Registry | je súčasťou GitHubu, pipeline doň pushuje cez `GITHUB_TOKEN` bez ďalších hesiel |
+| tag image = krátky hash commitu | každý build má iný tag, takže sa vždy zmení Pod a vidím, z ktorého commitu image je |
+| pipeline sa spúšťa len pri zmene v `app/` | commit bota mení `charts/`, takže nevznikne nekonečný cyklus |
+| `ingressendpoint.ip=127.0.0.1` v Traefiku | Argo CD považuje Ingress za zdravý až s adresou a pri NodePorte ju Traefik nemal odkiaľ vziať |
+| bonus vo vetve `main-bonus` | `main` zostal v stave, v akom som ho odovzdal |
 
 ---
 
 ## Čo by som doplnil
 
+- **testy v pipeline:** unit testy appky pred buildom, teraz kontroluje len `helm lint`
+- **oddelené nasadenie do produ:** pipeline teraz mení tag pre dev aj prod naraz. Lepšie by bolo meniť len dev a do produ posielať verziu samostatným PR po overení.
+- **skenovanie image** na zraniteľnosti (napr. Trivy) v pipeline
+- **app of apps:** Argo CD by spravovalo aj vlastné Application z priečinka `argocd/`
 - **monitoring:** Prometheus a Alertmanager a základné alerty, napríklad keď sa Pod stále reštartuje
 - **HTTPS:** certifikáty cez cert-manager
 - **lepšie riešenie Secretov:** napríklad Sealed Secrets, aby aj Secret mohol byť v Gite
