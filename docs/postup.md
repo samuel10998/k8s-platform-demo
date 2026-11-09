@@ -1241,3 +1241,184 @@ kubectl get pods -n demo-dev
 
 - Ingress zostal v Argo CD `Progressing`, lebo pri Traefiku cez NodePort nemal vyplnený `ADDRESS`. Pre Kubernetes to nevadí a appka fungovala, ale Argo CD bez adresy nepovažuje Ingress za zdravý. Opravil som to v Traefiku cez `ingressendpoint.ip`, nie v charte appky, lebo adresu zapisuje Ingress controller.
 - Do `valueFiles` som najprv dal cestu k chartu namiesto súboru s hodnotami. Argo CD už vie, kde je chart, z `path`, a vo `valueFiles` hľadá súbory v tomto priečinku.
+
+---
+
+## Fáza 7 – CI cez GitHub Actions
+
+Cieľ bol, aby som pri zmene kódu appky nemusel ručne robiť `docker build`, `kind load` a meniť tag vo values. Pipeline v GitHub Actions postaví image, dá ho do GitHub Container Registry (GHCR), zapíše nový tag do chartu a commitne to. Nasadenie potom spraví Argo CD z fázy 6.
+
+```
+zmena v app/ → merge do main-bonus
+  → GitHub Actions: build → push do ghcr.io → nový tag do values.yaml + verzia chartu → commit
+  → Argo CD uvidí zmenu v charte → nasadí nový image
+```
+
+```powershell
+git switch main-bonus
+git pull
+git switch -c faza-7
+Start-Transcript -Path .\logs\faza7.txt
+New-Item -ItemType Directory -Path .github\workflows -Force
+```
+
+### Workflow
+
+`.github/workflows/ci.yaml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches:
+      - main-bonus
+    paths:
+      - "app/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Helm lint
+        run: helm lint charts/demo-app
+
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: app/backend
+          push: true
+          tags: ghcr.io/samuel10998/demo-backend:${{ env.TAG }}
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: app/frontend
+          push: true
+          tags: ghcr.io/samuel10998/demo-frontend:${{ env.TAG }}
+
+      - name: Update Helm chart
+        run: |
+          yq -i '.backend.image.repository = "ghcr.io/samuel10998/demo-backend"' charts/demo-app/values.yaml
+          yq -i '.backend.image.tag = "${{ env.TAG }}"' charts/demo-app/values.yaml
+          yq -i '.frontend.image.repository = "ghcr.io/samuel10998/demo-frontend"' charts/demo-app/values.yaml
+          yq -i '.frontend.image.tag = "${{ env.TAG }}"' charts/demo-app/values.yaml
+          yq -i '.version = "0.1.${{ github.run_number }}"' charts/demo-app/Chart.yaml
+          yq -i '.appVersion = "${{ env.TAG }}"' charts/demo-app/Chart.yaml
+
+      - name: Package and push chart
+        run: |
+          helm package charts/demo-app -d dist
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm push dist/demo-app-0.1.${{ github.run_number }}.tgz oci://ghcr.io/samuel10998/charts
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add charts/demo-app
+          git commit -m "ci: image ${{ env.TAG }}"
+          git push
+```
+
+- `on.push` so `paths: app/**`: pipeline sa spustí len pri zmene kódu appky, nie pri zmene dokumentácie alebo chartu
+- `permissions`: `contents: write` na commit späť do repa, `packages: write` na push do GHCR
+- pod `jobs` je ID jobu (`build`) ako kľúč a až pod ním `runs-on` a `steps`
+- krok s `uses:` je hotová akcia, krok s `run:` sú moje príkazy. Runner je Linux, takže príkazy sú pre bash.
+- `helm lint` je kontrola: keď je chart pokazený, pipeline skončí skôr, ako niečo postaví
+- tag je prvých 7 znakov hashu commitu (`GITHUB_SHA::7`). Cez `$GITHUB_ENV` je dostupný v ďalších krokoch ako `${{ env.TAG }}`. Každý commit má iný tag, takže sa vždy zmení šablóna Podu a vidím, z ktorého commitu image vznikol.
+- `GITHUB_TOKEN` je dočasný token, ktorý GitHub dá každému behu, nič som nezakladal
+- `yq` mení hodnoty v YAML. Verzia chartu je `0.1.<číslo behu>` a `appVersion` je tag image.
+- `helm package` a `helm push` dajú chart ako balík do GHCR (`charts/demo-app`)
+- commit robí `github-actions[bot]`, takže v histórii je vidieť, čo spravila pipeline
+
+Pipeline sa sama znova nespustí: jej commit mení len `charts/`, nie `app/`, a push cez `GITHUB_TOKEN` ďalší workflow neštartuje.
+
+```powershell
+git add .github
+git commit -m "ci: github actions workflow"
+git push -u origin faza-7
+# PR faza-7 → main-bonus, merge
+```
+
+### Prvý beh
+
+Ručné spustenie cez Run workflow nešlo. GitHub ukazuje workflow a tlačidlo Run workflow len z východzej vetvy, a tá je `main`, kde `ci.yaml` nie je a ani nemá byť. Pipeline som preto spustil zmenou v `app/`:
+
+```powershell
+git switch main-bonus
+git pull
+git switch faza-7
+git merge main-bonus
+# zmena <title> v app/frontend/index.html
+git add app
+git commit -m "feat: zmena nadpisu na frontende"
+git push
+# PR faza-7 → main-bonus, merge
+```
+
+Ani potom som beh na stránke Actions nevidel. Zobrazil sa až cez priamy odkaz `https://github.com/samuel10998/k8s-platform-demo/actions/workflows/ci.yaml`, lebo úvodná stránka Actions sa riadi tiež vetvou `main`.
+
+Beh CI #1 prešiel za 38 sekúnd.
+
+![Beh pipeline](images/faza_7_actions.png)
+
+```powershell
+git fetch
+git log --oneline -3 origin/main-bonus
+kubectl get pods -n demo-dev
+kubectl get deployment demo-backend -n demo-dev -o jsonpath="{.spec.template.spec.containers[0].image}"
+kubectl get deployment demo-frontend -n demo-dev -o jsonpath="{.spec.template.spec.containers[0].image}"
+```
+
+- navrchu `main-bonus` pribudol commit `ci: image a5ef2ea` od `github-actions[bot]`
+- Argo CD zmenu nasadilo, Application boli chvíľu `Progressing` a potom `Healthy`
+- nové Pody bežia z `ghcr.io/samuel10998/demo-backend:a5ef2ea` a `ghcr.io/samuel10998/demo-frontend:a5ef2ea`
+- nikde som nespustil `docker build`, `kind load`, `helm` ani `kubectl apply`
+- balíky v GHCR: <doplniť: boli Public hneď / prepol som ich na Public v Package settings>
+
+Zmena sa nasadila aj do produ, lebo image je vo `values.yaml`, ktorý platí pre obe prostredia. Vo firme by pipeline menila len dev a do produ by išla nová verzia samostatným PR po overení v deve.
+
+### S čím som si potreboval pomôcť
+
+- GitHub Actions som robil prvýkrát (zistil som, že workflow je YAML v `.github/workflows/`, skladá sa z jobov a krokov a beží na runneri od GitHubu)
+- prečo register image (zistil som, že runner na GitHube sa k môjmu kind nedostane, takže image musí byť v registri a klaster si ho odtiaľ stiahne)
+- rozdiel medzi `uses:` a `run:`
+- premenné a výrazy `${{ }}` vo workflow a ako si uložiť vlastnú premennú cez `$GITHUB_ENV`
+- `GITHUB_TOKEN` a `permissions`
+- `yq` na zmenu hodnôt v YAML
+- ako sa vyhnúť nekonečnému cyklu, keď pipeline commitne do tej istej vetvy (zistil som, že stačí filter `paths` a navyše push cez `GITHUB_TOKEN` workflow nespúšťa)
+- prečo nový tag pri každom builde
+
+### Problémy
+
+- Pod `jobs` som najprv napísal `name: build`. Pod `jobs` musí byť ID jobu ako kľúč (`build:`) a až pod ním jeho nastavenia.
+- Workflow nebolo vidieť na stránke Actions a nešlo spustiť ručne, lebo GitHub berie workflow z východzej vetvy `main`. Pipeline som spustil zmenou v `app/` a beh som našiel cez priamy odkaz na workflow.
+- `yq` pri zápise odstránil prázdne riadky vo `values.yaml` a posunul komentár. Funkčne to nevadí a pri ďalších behoch sa menia už len tagy.
+
+
+
+
+
+
+
+
+
