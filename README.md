@@ -4,6 +4,13 @@ Kubernetes prostredie pre jednoduchú webovú appku (frontend + backend). Klaste
 
 **Použité technológie:** kind (Kubernetes 1.35.8), Docker, Helm, Traefik, RBAC, NetworkPolicy, Python (Flask), nginx
 
+> [!NOTE]
+> **Bonus:** Vo vetve [`main-bonus`](https://github.com/samuel10998/k8s-platform-demo/tree/main-bonus) som projekt rozšíril o dve veci navyše:
+> - **GitOps cez Argo CD:** appku do dev aj prod nasadzuje Argo CD podľa toho, čo je v Gite, nie `helm upgrade` z môjho PC
+> - **CI cez GitHub Actions:** pri zmene kódu appky pipeline postaví image, dá ich do GitHub Container Registry a zapíše nový tag do Helm chartu. Argo CD novú verziu potom nasadí samo.
+>
+> Vetva `main` zostala tak, ako som zadanie odovzdal. README a postup k bonusu sú vo vetve `main-bonus`.
+
 ![Appka cez Ingress](docs/images/faza_4_final.png)
 
 Celý postup, príkazy a problémy, ktoré som riešil, sú v [docs/postup.md](docs/postup.md).
